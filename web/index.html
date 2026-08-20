@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Word Studio</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-left="open" data-right="open">
+
+  <!-- 顶栏 -->
+  <header id="topbar">
+    <div class="brand">Word Studio</div>
+    <div class="doc-name" id="doc-name">未打开文档</div>
+    <button class="btn primary" id="btn-import">导入 docx</button>
+    <input type="file" id="file-input" accept=".docx,.doc" hidden>
+    <div class="topbar-spacer"></div>
+    <span id="health-dot" class="health-dot" title="服务状态"></span>
+    <button class="btn" id="btn-history" disabled>历史</button>
+    <button class="btn" id="btn-export-pdf" disabled>导出 PDF</button>
+    <button class="btn primary" id="btn-export-docx" disabled>导出 docx</button>
+    <button class="btn" id="btn-settings" disabled>设置</button>
+  </header>
+
+  <!-- 三栏主体：左栏 | resizer | 中栏 | resizer | 右栏 -->
+  <main id="layout">
+
+    <!-- 左栏：导航 -->
+    <aside id="left-panel" class="panel">
+      <div class="panel-header">
+        <span>导航</span>
+        <button class="icon-btn" id="collapse-left" title="折叠左栏">«</button>
+      </div>
+      <section class="outline-section">
+        <h3>大纲</h3>
+        <div id="outline" class="placeholder">导入文档后显示大纲树</div>
+      </section>
+      <section class="pages-section">
+        <h3>页面</h3>
+        <div id="pages" class="placeholder">分页预览后显示页面缩略图</div>
+      </section>
+    </aside>
+
+    <div class="resizer" id="resizer-left" data-target="left"></div>
+
+    <!-- 中栏：格式菜单 + 预览 -->
+    <section id="center-panel">
+      <div id="format-menu">
+        <button class="btn" id="btn-page-setup" disabled>页面设置</button>
+        <select id="style-select" disabled><option>样式</option></select>
+        <span class="fmt-sep"></span>
+        <button class="btn fmt" id="fmt-bold" disabled><b>B</b></button>
+        <button class="btn fmt" id="fmt-italic" disabled><i>I</i></button>
+        <button class="btn fmt" id="fmt-underline" disabled><u>U</u></button>
+        <select id="fmt-font" disabled>
+          <option value="">字体</option>
+          <option value="宋体">宋体</option>
+          <option value="黑体">黑体</option>
+          <option value="微软雅黑">微软雅黑</option>
+          <option value="楷体">楷体</option>
+          <option value="Times New Roman">Times</option>
+          <option value="Arial">Arial</option>
+        </select>
+        <select id="fmt-size" disabled>
+          <option value="">字号</option>
+          <option value="9">小五</option>
+          <option value="10.5">五号</option>
+          <option value="12">小四</option>
+          <option value="14">四号</option>
+          <option value="16">三号</option>
+          <option value="18">小二</option>
+          <option value="22">二号</option>
+        </select>
+        <button class="btn fmt" id="fmt-align-left" disabled>居左</button>
+        <button class="btn fmt" id="fmt-align-center" disabled>居中</button>
+        <select id="fmt-lineheight" disabled>
+          <option value="">行距</option>
+          <option value="1.15">1.15</option>
+          <option value="1.5">1.5</option>
+          <option value="2">2.0</option>
+        </select>
+        <span class="fmt-sep"></span>
+        <button class="btn" id="btn-edit-mode" disabled>编辑</button>
+      </div>
+      <div id="viewer" class="placeholder-lg">
+        <p>分页预览区</p>
+        <p class="hint">导入 docx 后，此处用 Paged.js 渲染分页预览（页眉 / 页脚 / 页码可见）</p>
+      </div>
+    </section>
+
+    <div class="resizer" id="resizer-right" data-target="right"></div>
+
+    <!-- 右栏：AI -->
+    <aside id="right-panel" class="panel">
+      <div class="panel-header tabs">
+        <button class="tab active" data-tab="chat">对话</button>
+        <button class="tab" data-tab="files">文件</button>
+        <div class="topbar-spacer"></div>
+        <button class="icon-btn" id="collapse-right" title="折叠右栏">»</button>
+      </div>
+
+      <div class="tab-page" id="tab-chat">
+        <div id="selection-chip" class="chip hidden">
+          <span id="selection-chip-text">选中：—</span>
+          <button class="chip-close" title="移除选区">×</button>
+        </div>
+        <div id="chat-stream" class="placeholder">AI 对话区（流式输出 + 工具时间轴）</div>
+        <div id="ref-chips"></div>
+        <div id="mention-popup" class="hidden"></div>
+        <div id="model-bar">
+          <select id="provider-select" title="选择 provider"></select>
+          <select id="model-select" title="选择模型"></select>
+          <input id="model-input" placeholder="输入模型名" title="自定义模型名" class="hidden">
+          <span id="model-bar-state"></span>
+        </div>
+        <div id="chat-input-bar">
+          <button class="btn" id="btn-mention" title="@ 引用文件">@</button>
+          <textarea id="chat-input" placeholder="输入消息，@ 引用文件…" disabled></textarea>
+          <button class="btn primary" id="btn-send" disabled>发送</button>
+        </div>
+        <input type="file" id="ref-file-input" hidden>
+      </div>
+
+      <div class="tab-page hidden" id="tab-files">
+        <div class="placeholder">会话涉及文件清单（主文档 / 引用 / AI 触碰文件）</div>
+      </div>
+    </aside>
+
+  </main>
+
+  <!-- 折叠后的展开把手 -->
+  <button class="expand-handle left" id="expand-left" title="展开左栏">»</button>
+  <button class="expand-handle right" id="expand-right" title="展开右栏">«</button>
+
+  <script>window.PagedConfig = { auto: false };</script>
+  <script src="vendor/pagedjs/paged.polyfill.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

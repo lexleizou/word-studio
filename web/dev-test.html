@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>phase6 集成测试</title></head>
+<body>
+<pre id="log">RUNNING</pre>
+<iframe id="app" src="index.html#doc=dmt1bpm0p283231" style="width:1200px;height:700px"></iframe>
+<script>
+const log = (m) => document.getElementById('log').textContent += '\n' + m;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+let pass = 0, fail = 0;
+function assert(name, cond) {
+  if (cond) { pass++; log('PASS ' + name); } else { fail++; log('FAIL ' + name); }
+}
+
+async function waitFor(fn, timeout = 8000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    try { const v = fn(); if (v) return v; } catch {}
+    await sleep(150);
+  }
+  return null;
+}
+
+(async () => {
+  const frame = document.getElementById('app');
+  await new Promise(r => frame.onload = r);
+  const W = frame.contentWindow;
+  const D = frame.contentDocument;
+  const ready = await waitFor(() => W.__ws && D.querySelector('#viewer p[data-block-id]') && D.querySelectorAll('#viewer [data-block-id]').length > 30);
+  assert('应用加载并分页完成', !!ready);
+  const M = W.__ws.model;
+  await sleep(800); // 分页收尾
+
+  // --- 1. 块点选 ---
+  const blocks = D.querySelectorAll('#viewer [data-block-id]');
+  const p1 = [...blocks].find(el => el.tagName === 'P');
+  assert('存在段落块元素', !!p1);
+  p1.dispatchEvent(new W.MouseEvent('click', { bubbles: true }));
+  let sel = M.get('selection');
+  log('DEBUG step1: p1.id=' + p1.dataset.blockId + ' sel=' + JSON.stringify(sel));
+  assert('块点选产生选区', !!sel && !!sel.blockIds && sel.blockIds.length === 1);
+
+  // --- 2. Shift 连选 ---
+  const allBlocks = [...D.querySelectorAll('#viewer [data-block-id]')];
+  const target = allBlocks[allBlocks.length - 1];
+  target.dispatchEvent(new W.MouseEvent('click', { bubbles: true, shiftKey: true }));
+  sel = M.get('selection');
+  log('DEBUG shift: anchor=' + (sel && JSON.stringify(sel).slice(0, 120)) + ' target=' + target.dataset.blockId + ' total=' + allBlocks.length);
+  assert('Shift 连选范围扩大', !!sel && sel.blockIds.length > 1);
+
+  // --- 3. 大纲选章 ---
+  const outlineItem = D.querySelector('.outline-item[data-block-id]');
+  outlineItem.dispatchEvent(new W.MouseEvent('click', { bubbles: true }));
+  sel = M.get('selection');
+  assert('大纲选章选中多个块', !!sel && sel.blockIds.length > 1 && sel.label.includes('个块'));
+
+  // --- 4. 块内文本选区 + 粗体格式的 run 拆分 ---
+  // 找一个单碎片段落
+  let paraEl = null;
+  for (const el of D.querySelectorAll('#viewer p[data-block-id]')) {
+    const id = el.dataset.blockId;
+    if (D.querySelectorAll(`#viewer [data-block-id="${id}"]`).length === 1 && el.textContent.length > 10) { paraEl = el; break; }
+  }
+  assert('找到未拆分段落', !!paraEl);
+  const textNode = (function find(n) { return n.nodeType === 3 ? n : find(n.firstChild); })(paraEl);
+  const range = D.createRange();
+  range.setStart(textNode, 1);
+  range.setEnd(textNode, 4);
+  W.getSelection().removeAllRanges();
+  W.getSelection().addRange(range);
+  D.dispatchEvent(new Event('selectionchange', { bubbles: true }));
+  sel = M.get('selection');
+  assert('文本选区带偏移', !!sel && sel.blockId === paraEl.dataset.blockId && sel.endOffset > sel.startOffset);
+
+  const boldBefore = JSON.stringify(M.get('docModel').blocks.find(b => b.id === sel.blockId).runs);
+  D.getElementById('fmt-bold').dispatchEvent(new W.MouseEvent('click', { bubbles: true }));
+  await waitFor(() => !D.querySelector('#viewer .editing') && D.querySelector('.pagedjs_page'));
+  await sleep(600);
+  const res = await W.__ws.api.getModel(M.get('doc').id);
+  const block = res.model.blocks.find(b => b.id === sel.blockId);
+  assert('粗体已写回并拆分 run', JSON.stringify(block.runs) !== boldBefore && block.runs.some(r => r.bold));
+  const hist = await W.__ws.api.getHistory(M.get('doc').id);
+  assert('产生 format: 粗体 commit', hist.ok && hist.history[0].message.startsWith('format:'));
+
+  // --- 5. 编辑模式 ---
+  D.getElementById('btn-edit-mode').dispatchEvent(new W.MouseEvent('click', { bubbles: true }));
+  const editTarget = [...D.querySelectorAll('#viewer p[data-block-id]')][0];
+  const editId = editTarget.dataset.blockId;
+  editTarget.dispatchEvent(new W.MouseEvent('click', { bubbles: true }));
+  assert('进入就地编辑', !!D.querySelector('#viewer .editing'));
+  const editingEl = D.querySelector('#viewer .editing');
+  editingEl.innerText = '集成测试修改的文字XYZ';
+  editingEl.dispatchEvent(new W.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await sleep(800);
+  const res2 = await W.__ws.api.getModel(M.get('doc').id);
+  const edited = res2.model.blocks.find(b => b.id === editId);
+  assert('编辑内容已写回模型', (edited.runs || []).map(r => r.text).join('').includes('集成测试修改的文字XYZ'));
+  const hist2 = await W.__ws.api.getHistory(M.get('doc').id);
+  assert('产生 manual: commit', hist2.ok && hist2.history[0].message.startsWith('manual:'));
+
+  log(`\nRESULT pass=${pass} fail=${fail}`);
+  document.title = fail === 0 ? 'ALL_PASS' : 'HAS_FAIL';
+})().catch(e => { log('ERROR ' + e.message); document.title = 'ERROR'; });
+</script>
+</body></html>
