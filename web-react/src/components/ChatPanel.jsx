@@ -103,12 +103,18 @@ function ToolItem({ name, ok, rejected }) {
 // ---------- diff 确认卡 ----------
 function ProposalCard({ proposal, onDone }) {
   const [state, setState] = useState('pending'); // pending | accepted | rejected
+  const doc = store.get('doc');
   const decide = async (accept) => {
     setState(accept ? 'accepted' : 'rejected');
     await api.confirmProposal(proposal.proposalId, accept);
     onDone?.(accept);
   };
   const rows = proposal.diff.slice(0, 12);
+  // 图片新增项：提炼 assets 路径用于缩略图预览
+  const imgOf = (c) => {
+    const m = /\[图片 (assets\/[^\]]+)\]/.exec(c.after || '');
+    return m ? `/api/docs/${doc?.id}/assets/${m[1].split('/').pop()}` : null;
+  };
   return (
     <Card
       size="small"
@@ -127,6 +133,7 @@ function ProposalCard({ proposal, onDone }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               {c.before && <div style={{ color: '#b91c1c', textDecoration: 'line-through', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.before.slice(0, 120)}</div>}
               {c.after && <div style={{ color: '#15803d', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.after.slice(0, 120)}</div>}
+              {imgOf(c) && <img src={imgOf(c)} alt="待插入插图" style={{ marginTop: 4, maxWidth: 220, maxHeight: 160, borderRadius: 4, border: '1px solid #e4e4e7' }} />}
             </div>
           </div>
         ))}

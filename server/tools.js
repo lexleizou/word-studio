@@ -55,6 +55,7 @@ export const toolSchemas = [
   { name: 'git_commit', description: '提交一个 git 版本（自定义提交说明）', parameters: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] } },
   { name: 'git_history', description: '查看最近提交历史', parameters: { type: 'object', properties: {} } },
   { name: 'import_file', description: '【写】把 @ 引用文件的内容导入文档（插入为若干段落）', parameters: { type: 'object', properties: { fileId: { type: 'string' }, afterId: { type: 'string', description: '插入位置（在该块之后）' } }, required: ['fileId', 'afterId'] } },
+  { name: 'generate_image', description: '【写】用 AI 生成插图并插入文档（需要已登录的 Codex provider）。给出画面描述，可指定插入位置', parameters: { type: 'object', properties: { prompt: { type: 'string', description: '插图的画面描述（中文即可）' }, afterId: { type: 'string', description: '插入位置（在该块之后；省略则插到文档末尾）' }, widthMm: { type: 'number', description: '插图宽度 mm（可选，默认按内容区宽度的 80%）' } }, required: ['prompt'] } },
   { name: 'use_skill', description: '获取指定技能（SKILL.md）的完整指导文本', parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
 ];
 
@@ -159,6 +160,19 @@ function execWrite(name, args, modelCopy) {
     }
     case 'git_commit':
       return '将在确认后提交: ' + args.message;
+    case 'generate_image': {
+      // 图片已在 executeTool 阶段生成并落地 assets，这里只插入 image 块
+      const newBlock = {
+        id: 'b' + (maxBlockNum(modelCopy) + 1),
+        type: 'image',
+        src: args._asset,
+        ...(args.widthMm ? { widthMm: args.widthMm } : {}),
+      };
+      const top = modelCopy.blocks;
+      const idx = top.findIndex(x => x.id === args.afterId);
+      if (idx === -1) top.push(newBlock); else top.splice(idx + 1, 0, newBlock);
+      return `已生成插图并插入（${newBlock.id}）`;
+    }
     case 'import_file': {
       const paras = (args._refText || '').split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
       if (!paras.length) return '引用文件没有可导入的文本';
@@ -182,7 +196,7 @@ function deepMerge(target, src) {
   }
 }
 
-const WRITE_TOOLS = new Set(['patch_blocks', 'apply_style', 'insert_block', 'delete_blocks', 'search_replace', 'update_style', 'update_page_setup', 'git_commit', 'import_file']);
+const WRITE_TOOLS = new Set(['patch_blocks', 'apply_style', 'insert_block', 'delete_blocks', 'search_replace', 'update_style', 'update_page_setup', 'git_commit', 'import_file', 'generate_image']);
 export const isWriteTool = (name) => WRITE_TOOLS.has(name);
 
 // ---------- diff ----------
@@ -234,6 +248,7 @@ function scopeCheck(name, args, scope) {
     patch_blocks: (args.patches || []).map(p => p.id),
     apply_style: (args.items || []).map(i => i.id),
     insert_block: [args.afterId],
+    generate_image: [args.afterId].filter(Boolean),
     delete_blocks: args.ids || [],
     search_replace: args.scope?.length ? args.scope : [...allowed],
   }[name];
@@ -256,6 +271,17 @@ export async function executeTool(name, args, ctx) {
   }
   const err = scopeCheck(name, args, ctx.scope);
   if (err) return { kind: 'read', result: err }; // 越界按普通工具结果反馈给模型
+  // generate_image 先生成图片落地 assets（拒绝提案时图片文件残留，容忍）
+  if (name === 'generate_image') {
+    const { generateImage } = await import('./image-gen.js');
+    const buf = await generateImage(args.prompt || '');
+    if (!buf) return { kind: 'read', result: '图片生成失败：未配置 Codex provider，或后端未返回图片' };
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    await mkdir(join(ctx.dir, 'assets'), { recursive: true });
+    const fileName = 'gen-' + Date.now().toString(36) + '.png';
+    await writeFile(join(ctx.dir, 'assets', fileName), buf);
+    args._asset = 'assets/' + fileName;
+  }
   // import_file 先取出引用文本
   if (name === 'import_file') {
     const { refText } = await import('./refs.js');

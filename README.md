@@ -26,6 +26,7 @@ npm start          # 或 npm run dev（--watch）
   - provider 体系：设置里列表式管理（一行一个，点进详情）；类型预设含 OpenAI 兼容端点（自定义）/ OpenAI / DeepSeek / Moonshot / 智谱 / OpenRouter；支持测试连接、从供应商拉模型列表逐个启停
   - OAuth 账号型 provider（均可多账号）：GitHub Copilot（设备码）/ Codex（ChatGPT 账号 PKCE，走 Responses API）
   - `@` 引用文件（docx/pdf/txt/md 提取文本注入上下文，图片走多模态），AI 可用 `import_file` 导入文档
+  - `generate_image` 工具：Codex（ChatGPT 账号）后端的 image_generation 生成插图并插入文档，同样走 diff 提案确认（确认卡带缩略图）
   - Skills：目录式技能（`data/skills/<name>/SKILL.md`），设置面板启停 / 导入
   - MCP：stdio + streamable-http 客户端，配置存 `data/mcp.json`，工具以 `mcp__<服务>__<工具>` 并入
 - **导出**：docx（npm docx 重新生成，含样式 / 页眉页脚 / 页码域 / TOC 域）；PDF（无头 Chrome 打印预览页，所见即所得）
