@@ -60,8 +60,13 @@ function blockStyle(block, model) {
   const after = block.spaceAfter ?? st.spaceAfter;
   if (before) style += `margin-top:${before}mm;`;
   if (after) style += `margin-bottom:${after}mm;`;
-  const lineHeight = block.lineHeight ?? st.lineHeight;
-  if (lineHeight) style += `line-height:${lineHeight};`;
+  // 行距：exact/atLeast 绝对毫米值优先，其次 auto 倍数
+  const lhMm = block.lineHeightMm ?? st.lineHeightMm;
+  if (lhMm) style += `line-height:${lhMm}mm;`;
+  else {
+    const lineHeight = block.lineHeight ?? st.lineHeight;
+    if (lineHeight) style += `line-height:${lineHeight};`;
+  }
   return style;
 }
 
@@ -81,8 +86,8 @@ function blockToHtml(block, model, docId) {
           const title = full.slice(0, ti).trim();
           const page = full.slice(ti + 1).trim();
           const firstFont = (block.runs || []).find(r => r.font)?.font;
-          const style = [style, firstFont ? cssFontFamily(firstFont) : ''].filter(Boolean).join('');
-          return `<p data-block-id="${block.id}" class="toc-e" style="${style}"><span class="toc-t">${escapeHtml(title)}</span><span class="toc-dots"></span><span class="toc-p">${escapeHtml(page)}</span></p>`;
+          const rowStyle = [style, firstFont ? cssFontFamily(firstFont) : ''].filter(Boolean).join('');
+          return `<p data-block-id="${block.id}" class="toc-e" style="${rowStyle}"><span class="toc-t">${escapeHtml(title)}</span><span class="toc-dots"></span><span class="toc-p">${escapeHtml(page)}</span></p>`;
         }
       }
       return inner ? `<p ${attr}>${inner}</p>` : `<p ${attr}><br></p>`;

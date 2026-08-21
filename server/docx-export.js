@@ -78,6 +78,15 @@ const docxFont = (f) => {
   return parts.length > 1 ? { ascii: parts[0], eastAsia: parts[1] } : parts[0];
 };
 
+// 行距 → docx spacing：auto 倍数（line/240）或 exact/atLeast 绝对 twips
+function spacingLine(b, st) {
+  const lhMm = b.lineHeightMm ?? st.lineHeightMm;
+  if (lhMm != null) return { line: mmToTwip(lhMm), lineRule: (b.lineHeightRule ?? st.lineHeightRule) === 'exact' ? 'exact' : 'atLeast' };
+  const lh = b.lineHeight ?? st.lineHeight;
+  if (lh != null) return { line: Math.round(lh * 240) };
+  return {};
+}
+
 // ---------- run / paragraph 生成 ----------
 function textRun(r) {
   // 内联页码域（第X页/共Y页）→ 真 PAGE/NUMPAGES 域
@@ -109,7 +118,7 @@ function blockParagraph(block, model) {
     spacing: {
       before: (block.spaceBefore ?? st.spaceBefore) != null ? mmToTwip(block.spaceBefore ?? st.spaceBefore) : undefined,
       after: (block.spaceAfter ?? st.spaceAfter) != null ? mmToTwip(block.spaceAfter ?? st.spaceAfter) : undefined,
-      line: (block.lineHeight ?? st.lineHeight) != null ? Math.round((block.lineHeight ?? st.lineHeight) * 240) : undefined,
+      ...spacingLine(block, st),
     },
   };
   switch (block.type) {
@@ -239,7 +248,7 @@ export async function exportDocx(workspaceDir, model) {
         spacing: {
           before: st.spaceBefore != null ? mmToTwip(st.spaceBefore) : undefined,
           after: st.spaceAfter != null ? mmToTwip(st.spaceAfter) : undefined,
-          line: st.lineHeight != null ? Math.round(st.lineHeight * 240) : undefined,
+          ...spacingLine({}, st),
         },
         outlineLevel: st.outlineLevel ? Math.min(st.outlineLevel - 1, 3) : undefined,
       },

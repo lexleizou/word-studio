@@ -573,6 +573,26 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // Codex 设备码登录（推荐路径，不占本地回调端口）
+  if (url.pathname === '/api/codex/device/start' && req.method === 'POST') {
+    const body = await readBody(req).catch(() => '{}');
+    const accountId = JSON.parse(body || '{}').accountId || 'codex';
+    const { startCodexDeviceLogin } = await import('./codex-auth.js');
+    try {
+      sendJson(res, 200, { ok: true, ...(await startCodexDeviceLogin(accountId)) });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: 'codex_device_failed', message: err.message });
+    }
+    return;
+  }
+  if (url.pathname === '/api/codex/device/poll' && req.method === 'POST') {
+    const body = await readBody(req).catch(() => '{}');
+    const accountId = JSON.parse(body || '{}').accountId || 'codex';
+    const { pollCodexDeviceLogin } = await import('./codex-auth.js');
+    sendJson(res, 200, { ok: true, ...(await pollCodexDeviceLogin(accountId)) });
+    return;
+  }
+
   // Codex（ChatGPT 账号）OAuth：状态 / 发起（授权 URL + 本地回调）/ 轮询 / 登出
   if (url.pathname === '/api/codex/status' && req.method === 'GET') {
     const { codexStatus } = await import('./codex-auth.js');

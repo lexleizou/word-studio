@@ -151,6 +151,23 @@ export async function codexLogout(accountId) {
   })).json();
 }
 
+// Codex 设备码登录（推荐）
+export async function codexDeviceStart(accountId) {
+  return (await fetch('/api/codex/device/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })).json();
+}
+
+export async function codexDevicePoll(accountId) {
+  return (await fetch('/api/codex/device/poll', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })).json();
+}
+
 export async function listRefs(docId) {
   return (await fetch(`/api/docs/${docId}/refs`)).json();
 }

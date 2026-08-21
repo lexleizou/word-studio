@@ -76,41 +76,59 @@ function CopilotAuth({ accountId }) {
   );
 }
 
-// ---------- Codex OAuth（PKCE 浏览器登录 + 本地 1455 回调） ----------
+// ---------- Codex OAuth（设备码优先；浏览器 PKCE 回调为备用） ----------
 function CodexAuth({ accountId }) {
   const [loggedIn, setLoggedIn] = useState(false);
   const [account, setAccount] = useState('');
+  const [device, setDevice] = useState(null);
   const [pollState, setPollState] = useState('');
   useEffect(() => { api.codexStatus(accountId).then(d => { if (d.ok) { setLoggedIn(d.loggedIn); setAccount(d.account || ''); } }); }, [accountId]);
-  const login = async () => {
+
+  const onOk = (acc) => {
+    setLoggedIn(true);
+    setAccount(acc || '');
+    setDevice(null);
+    setPollState('');
+    message.success(`Codex 登录成功${acc ? `：${acc}` : ''}`);
+    window.dispatchEvent(new CustomEvent('providers-changed'));
+  };
+
+  // 设备码：打开 auth.openai.com/codex/device 输入一次性码
+  const loginDevice = async () => {
+    const r = await api.codexDeviceStart(accountId);
+    if (!r.ok) { setPollState('发起失败: ' + (r.message || r.error)); return; }
+    setDevice(r);
+    setPollState('等待授权…');
+    const timer = setInterval(async () => {
+      const p = await api.codexDevicePoll(accountId);
+      if (p.status === 'ok') { clearInterval(timer); onOk(p.account); }
+      else if (p.status === 'error') { clearInterval(timer); setPollState('登录失败: ' + p.message); }
+    }, Math.max((r.interval || 5), 2) * 1000);
+  };
+
+  // 浏览器 PKCE（备用）
+  const loginBrowser = async () => {
     const r = await api.codexStart(accountId);
     if (!r.ok) { setPollState('发起失败: ' + (r.message || r.error)); return; }
-    window.open(r.verificationUrl, '_blank'); // 浏览器完成 ChatGPT 登录，本地 1455 收回调
+    window.open(r.verificationUrl, '_blank');
     setPollState('等待浏览器完成登录…');
     const t0 = Date.now();
     const timer = setInterval(async () => {
       if (Date.now() - t0 > 180000) { clearInterval(timer); setPollState('登录超时，请重试'); return; }
       const p = await api.codexPoll(accountId);
-      if (p.status === 'ok') {
-        clearInterval(timer);
-        setLoggedIn(true);
-        setAccount(p.account || '');
-        setPollState('');
-        message.success(`Codex 登录成功${p.account ? `：${p.account}` : ''}`);
-        window.dispatchEvent(new CustomEvent('providers-changed'));
-      } else if (p.status === 'error') {
-        clearInterval(timer);
-        setPollState('登录失败: ' + p.message);
-      }
+      if (p.status === 'ok') { clearInterval(timer); onOk(p.account); }
+      else if (p.status === 'error') { clearInterval(timer); setPollState('登录失败: ' + p.message); }
     }, 3000);
   };
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         {loggedIn
           ? <Tag color="success" icon={<CheckCircleOutlined />}>已登录{account ? ` ${account}` : ''}</Tag>
           : <Tag>未登录</Tag>}
-        <Button size="small" disabled={loggedIn} onClick={login}>浏览器登录</Button>
+        <Button size="small" type="primary" ghost disabled={loggedIn} onClick={loginDevice}>设备码登录</Button>
+        <Button size="small" disabled={loggedIn} onClick={loginBrowser}>浏览器登录</Button>
         <Button size="small" disabled={!loggedIn} onClick={async () => {
           await api.codexLogout(accountId);
           setLoggedIn(false);
@@ -118,8 +136,14 @@ function CodexAuth({ accountId }) {
           window.dispatchEvent(new CustomEvent('providers-changed'));
         }}>登出</Button>
       </div>
-      {pollState && <p style={{ color: '#71717a', fontSize: 12, marginTop: 4 }}>{pollState}</p>}
-      <p style={{ color: '#a1a1aa', fontSize: 12, marginTop: 6 }}>ChatGPT 账号 OAuth（PKCE），对话走 Codex Responses API。</p>
+      {device && (
+        <p style={{ marginTop: 8, fontSize: 12 }}>
+          请打开 <a href={device.verificationUri} target="_blank" rel="noreferrer">{device.verificationUri}</a> 并输入一次性码：
+          <b className="mono" style={{ fontSize: 15 }}>{device.userCode}</b>
+        </p>
+      )}
+      {pollState && <p style={{ color: pollState.includes('失败') || pollState.includes('超时') ? '#b91c1c' : '#71717a', fontSize: 12, marginTop: 4 }}>{pollState}</p>}
+      <p style={{ color: '#a1a1aa', fontSize: 12, marginTop: 6 }}>ChatGPT 账号 OAuth；对话走 Codex Responses API。</p>
     </div>
   );
 }

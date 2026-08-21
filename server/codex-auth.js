@@ -62,26 +62,7 @@ export async function startCodexLogin(accountId = 'codex') {
   // 关键：回调 waiter 在发起时就注册（不是首次 poll 时）——登录快的时候回调可能先于 poll 到达
   callbackWaiters.set(state, async (code) => {
     try {
-      const res = await fetch(TOKEN_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code', client_id: CLIENT_ID,
-          code, code_verifier: verifier, redirect_uri: redirectUri,
-        }),
-      });
-      const data = await res.json();
-      if (!data.access_token) throw new Error(data.error_description || data.error || `HTTP ${res.status}`);
-      // id_token 里拿账号信息（邮箱 + chatgpt_account_id）
-      const claims = decodeJwt(data.id_token || '');
-      await kvSet(slotKey(accountId), {
-        accessToken: data.access_token,
-        refreshToken: data.refresh_token || '',
-        expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
-        account: claims.email || '',
-        chatgptAccountId: claims.chatgpt_account_id
-          || claims['https://api.openai.com/auth']?.organizations?.[0]?.id || '',
-      });
+      await exchangeAndStore(accountId, code, verifier, redirectUri);
     } catch (err) {
       record.error = 'token 交换失败: ' + err.message; // 让 poll 把真实错误带回 UI
       console.error('[codex] token 交换失败:', err.message);
@@ -160,4 +141,96 @@ export async function listCodexModels(accountId = 'codex') {
   return models
     .sort((a, b) => (a.priority || 99) - (b.priority || 99))
     .map(m => ({ id: m.slug, label: m.display_name || m.slug }));
+}
+
+// ---------- 设备码流程（推荐，不需要本地回调端口） ----------
+// 官方协议（codex-rs/login/src/device_code_auth.rs）：
+//   POST /api/accounts/deviceauth/usercode {client_id} → { device_auth_id, user_code, interval }
+//   用户打开 auth.openai.com/codex/device 输入 user_code
+//   轮询 POST /api/accounts/deviceauth/token {device_auth_id, user_code}（403/404 = 等待中）
+//   成功返回 { authorization_code, code_challenge, code_verifier }（服务端 PKCE）
+//   再用 /oauth/token 换 token，redirect_uri = {issuer}/deviceauth/callback
+const ISSUER = 'https://auth.openai.com';
+const DEVICE_USERCODE_URL = `${ISSUER}/api/accounts/deviceauth/usercode`;
+const DEVICE_TOKEN_URL = `${ISSUER}/api/accounts/deviceauth/token`;
+const DEVICE_VERIFY_URL = `${ISSUER}/codex/device`;
+const DEVICE_REDIRECT_URI = `${ISSUER}/deviceauth/callback`;
+const pendingDeviceLogins = new Map(); // accountId -> { deviceAuthId, userCode, interval, expiresAt, lastPoll, error }
+
+async function exchangeAndStore(accountId, code, codeVerifier, redirectUri) {
+  const res = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code', client_id: CLIENT_ID,
+      code, code_verifier: codeVerifier, redirect_uri: redirectUri,
+    }),
+  });
+  const data = await res.json();
+  if (!data.access_token) throw new Error(data.error_description || data.error || `HTTP ${res.status}`);
+  const claims = decodeJwt(data.id_token || '');
+  await kvSet(slotKey(accountId), {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || '',
+    expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
+    account: claims.email || '',
+    chatgptAccountId: claims.chatgpt_account_id
+      || claims['https://api.openai.com/auth']?.organizations?.[0]?.id || '',
+  });
+}
+
+export async function startCodexDeviceLogin(accountId = 'codex') {
+  const res = await fetch(DEVICE_USERCODE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: CLIENT_ID }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.device_auth_id) {
+    throw new Error(`设备码申请失败 HTTP ${res.status}: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  pendingDeviceLogins.set(accountId, {
+    deviceAuthId: data.device_auth_id,
+    userCode: data.user_code,
+    interval: (Number(data.interval) || 5) * 1000,
+    expiresAt: Date.now() + 15 * 60 * 1000,
+    lastPoll: 0,
+    error: null,
+  });
+  return { userCode: data.user_code, verificationUri: DEVICE_VERIFY_URL, interval: Number(data.interval) || 5 };
+}
+
+export async function pollCodexDeviceLogin(accountId = 'codex') {
+  const p = pendingDeviceLogins.get(accountId);
+  if (!p) {
+    const c = await kvGet(slotKey(accountId), null);
+    if (c?.accessToken) return { status: 'ok', account: c.account || '' };
+    return { status: 'error', message: '没有进行中的设备码登录' };
+  }
+  if (p.error) { pendingDeviceLogins.delete(accountId); return { status: 'error', message: p.error }; }
+  if (Date.now() > p.expiresAt) { pendingDeviceLogins.delete(accountId); return { status: 'error', message: '设备码已过期，请重新发起' }; }
+  if (Date.now() - p.lastPoll < p.interval) return { status: 'pending' };
+  p.lastPoll = Date.now();
+  const res = await fetch(DEVICE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_auth_id: p.deviceAuthId, user_code: p.userCode }),
+  });
+  if (res.status === 403 || res.status === 404) return { status: 'pending' }; // 等待用户授权
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    pendingDeviceLogins.delete(accountId);
+    return { status: 'error', message: `设备码登录失败 HTTP ${res.status}: ${text.slice(0, 150)}` };
+  }
+  const data = await res.json();
+  try {
+    // 服务端下发 PKCE 码 + 授权码；redirect_uri 是固定的 deviceauth/callback
+    await exchangeAndStore(accountId, data.authorization_code, data.code_verifier, DEVICE_REDIRECT_URI);
+    pendingDeviceLogins.delete(accountId);
+    const c = await kvGet(slotKey(accountId), null);
+    return { status: 'ok', account: c?.account || '' };
+  } catch (err) {
+    pendingDeviceLogins.delete(accountId);
+    return { status: 'error', message: 'token 交换失败: ' + err.message };
+  }
 }

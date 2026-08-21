@@ -38,6 +38,16 @@ const asArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
 const twipsToMm = (t) => (t == null ? undefined : Math.round((Number(t) / TWIPS_PER_MM) * 10) / 10);
 const halfPtToPt = (v) => (v == null ? undefined : Number(v) / 2);
 
+// w:spacing 的 line/lineRule → 行距：
+// auto → lineHeight 倍数（line/240）；exact/atLeast → lineHeightMm 绝对值 + lineHeightRule
+function parseLineSpacing(spacing) {
+  if (!spacing || spacing['@_line'] == null) return {};
+  const line = Number(spacing['@_line']);
+  const rule = spacing['@_lineRule'];
+  if (rule === 'exact' || rule === 'atLeast') return { lineHeightMm: twipsToMm(line), lineHeightRule: rule };
+  return { lineHeight: Math.round(line / 240 * 100) / 100 };
+}
+
 function textOf(node) {
   if (node == null) return '';
   if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -78,6 +88,7 @@ function parseStyles(xml) {
       outlineLevel: olVal != null && olVal < 9 ? olVal + 1 : undefined, // OOXML val 9 = 无大纲级别
       spaceBefore: twipsToMm(spacing?.['@_before']),
       spaceAfter: twipsToMm(spacing?.['@_after']),
+      ...parseLineSpacing(spacing),
     };
   }
   return styles;
@@ -181,6 +192,7 @@ function parseParagraph(p, ctx) {
   const spacing = asArray(pPr.spacing)[0];
   if (spacing?.['@_before']) base.spaceBefore = twipsToMm(spacing['@_before']);
   if (spacing?.['@_after']) base.spaceAfter = twipsToMm(spacing['@_after']);
+  Object.assign(base, parseLineSpacing(spacing));
   const jc = asArray(pPr.jc)[0]?.['@_val'];
   if (jc) base.alignment = jc;
 
