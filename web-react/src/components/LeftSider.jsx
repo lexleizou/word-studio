@@ -1,6 +1,22 @@
 // 左栏：大纲树（点章节 = 选中整章）+ 页面列表
 import { Layout, Tree, List } from 'antd';
-import { store, useStore, chapterBlockIds } from '../store.js';
+import { store, useStore, chapterBlockIds, outlineBlocks } from '../store.js';
+
+// 大纲平铺列表 → 按层级嵌套的 Tree 数据（层级跳变时挂到最近的浅层祖先）
+function buildTree(outline) {
+  const roots = [];
+  const stack = [];
+  for (const o of outline) {
+    const node = { title: o.title || '（无标题文字）', key: o.id, children: [] };
+    while (stack.length && stack[stack.length - 1].level >= o.level) stack.pop();
+    if (stack.length) stack[stack.length - 1].node.children.push(node);
+    else roots.push(node);
+    stack.push({ level: o.level, node });
+  }
+  const prune = (ns) => ns.forEach(n => { if (!n.children.length) delete n.children; else prune(n.children); });
+  prune(roots);
+  return roots;
+}
 
 export default function LeftSider() {
   const docModel = useStore('docModel');
@@ -16,13 +32,11 @@ export default function LeftSider() {
     );
   }
 
-  const headings = docModel.blocks.filter(b => b.type === 'heading');
-  const treeData = headings.map(h => ({
-    title: (h.runs || []).map(r => r.text).join('') || '（无标题文字）',
-    key: h.id,
-  }));
+  const outline = outlineBlocks(docModel);
+  const treeData = buildTree(outline);
+  const outlineIds = outline.map(o => o.id);
   const selectedKeys = selection?.blockIds?.length
-    ? headings.filter(h => selection.blockIds.includes(h.id)).map(h => h.id).slice(0, 1)
+    ? outlineIds.filter(id => selection.blockIds.includes(id)).slice(0, 1)
     : selection?.blockId ? [selection.blockId] : [];
 
   return (

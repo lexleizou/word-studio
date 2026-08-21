@@ -14,6 +14,9 @@ export const cssText = `
   .ant-layout-sider .ant-layout-sider-children > .ant-tabs { flex: none; }
   .chat-column { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .chat-stream { flex: 1; min-height: 0; overflow: auto; }
+  /* 流式打字光标 */
+  .ws-cursor { display: inline-block; color: #34568b; animation: ws-blink 0.9s steps(1) infinite; }
+  @keyframes ws-blink { 50% { opacity: 0; } }
 
   /* ---------- Paged.js 页面 ---------- */
   .viewer-scroll { background: #f4f4f5; }
@@ -40,21 +43,29 @@ export const cssText = `
   .doc-image { text-align: center; margin: 0.6em 0; }
 
   /* ---------- 页眉/页脚注入（margin box 内 DOM） ---------- */
-  .pagedjs_margin-top-center .pagedjs_margin-content { display: flex; align-items: flex-end; width: 100%; }
-  .pagedjs_margin-bottom-center .pagedjs_margin-content { display: flex; align-items: flex-start; width: 100%; }
+  /* 页眉从盒顶（页面顶边）起排 + margin-top=header 距离；页脚从盒底（页面底边）起排 + margin-bottom=footer 距离 */
+  .pagedjs_margin-top-center .pagedjs_margin-content { display: flex; align-items: flex-start; width: 100%; }
+  .pagedjs_margin-bottom-center .pagedjs_margin-content { display: flex; align-items: flex-end; width: 100%; }
   .doc-hf { width: 100%; font-size: 9pt; line-height: 1.3; color: #18181b; }
   .doc-hf p { margin: 0; min-height: 0; }
   .doc-hf table { border-collapse: collapse; margin: 0; }
   .doc-hf td { padding: 0 1.9mm; vertical-align: middle; line-height: 1.3; }
   .doc-hf img { display: block; }
-  .doc-hf-top { padding-bottom: 1.5mm; }
-  .doc-hf-bottom { padding-top: 1.5mm; }
   .doc-toc-placeholder {
     border: 1px dashed #d4d4d8; border-radius: 6px;
     padding: 24px; margin: 12px 0;
     text-align: center; color: #a1a1aa; font-size: 16px; font-weight: 600;
   }
   .doc-toc-placeholder span { display: block; font-size: 12px; font-weight: 400; margin-top: 6px; }
+
+  /* ---------- 打印版目录（TOC 域缓存条目 + 手写目录点线条目） ---------- */
+  .doc-toc { padding: 1mm 0; }
+  .toc-e { display: flex; align-items: baseline; margin: 0.35em 0; }
+  .toc-l2 { padding-left: 1.6em; }
+  .toc-l3 { padding-left: 3.2em; }
+  .toc-l4 { padding-left: 4.8em; }
+  .toc-dots { flex: 1; margin: 0 0.4em; border-bottom: 1px dotted #71717a; transform: translateY(-0.15em); }
+  .toc-p { font-variant-numeric: tabular-nums; }
 
   /* ---------- 选区高亮 ---------- */
   .doc-content [data-block-id].selected {

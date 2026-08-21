@@ -53,6 +53,15 @@ export async function getModels(providerId) {
   return (await fetch(`/api/config/models?providerId=${encodeURIComponent(providerId)}`)).json();
 }
 
+// 未保存端点探测：测试连接 + 拉模型（添加/编辑模型配置页）
+export async function probeProvider({ baseUrl, apiKey, type, accountId }) {
+  return (await fetch('/api/config/probe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseUrl, apiKey, type, accountId }),
+  })).json();
+}
+
 export async function getSkills() {
   return (await fetch('/api/skills')).json();
 }
@@ -85,20 +94,61 @@ export async function saveMcp(config) {
   })).json();
 }
 
-export async function copilotStatus() {
-  return (await fetch('/api/copilot/status')).json();
+export async function copilotStatus(accountId) {
+  return (await fetch(`/api/copilot/status?accountId=${encodeURIComponent(accountId || 'copilot')}`)).json();
 }
 
-export async function copilotStart() {
-  return (await fetch('/api/copilot/login/start', { method: 'POST' })).json();
+export async function copilotStart(accountId) {
+  return (await fetch('/api/copilot/login/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })).json();
 }
 
-export async function copilotPoll() {
-  return (await fetch('/api/copilot/login/poll', { method: 'POST' })).json();
+export async function copilotPoll(accountId) {
+  return (await fetch('/api/copilot/login/poll', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })).json();
 }
 
-export async function copilotLogout() {
-  return (await fetch('/api/copilot/logout', { method: 'POST' })).json();
+export async function copilotLogout(accountId) {
+  return (await fetch('/api/copilot/logout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })).json();
+}
+
+// Codex（ChatGPT 账号）OAuth
+export async function codexStatus(accountId) {
+  return (await fetch(`/api/codex/status?accountId=${encodeURIComponent(accountId || 'codex')}`)).json();
+}
+
+export async function codexStart(accountId) {
+  return (await fetch('/api/codex/login/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })).json();
+}
+
+export async function codexPoll(accountId) {
+  return (await fetch('/api/codex/login/poll', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })).json();
+}
+
+export async function codexLogout(accountId) {
+  return (await fetch('/api/codex/logout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })).json();
 }
 
 export async function listRefs(docId) {

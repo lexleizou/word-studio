@@ -71,8 +71,24 @@ function imageDimensions(buf) {
   return null;
 }
 
+// docx 库 font 参数："ascii, eastAsia" 逗号串 → { ascii, eastAsia } 对象
+const docxFont = (f) => {
+  if (!f) return undefined;
+  const parts = String(f).split(',').map(s => s.trim()).filter(Boolean);
+  return parts.length > 1 ? { ascii: parts[0], eastAsia: parts[1] } : parts[0];
+};
+
 // ---------- run / paragraph 生成 ----------
 function textRun(r) {
+  // 内联页码域（第X页/共Y页）→ 真 PAGE/NUMPAGES 域
+  if (r.field === 'page' || r.field === 'pages') {
+    return new TextRun({
+      children: [r.field === 'page' ? PageNumber.CURRENT : PageNumber.TOTAL_PAGES],
+      color: r.color ? r.color.replace('#', '') : undefined,
+      size: r.size ? ptToHalfPt(r.size) : undefined,
+      font: docxFont(r.font),
+    });
+  }
   return new TextRun({
     text: r.text || '',
     bold: !!r.bold,
@@ -80,7 +96,7 @@ function textRun(r) {
     underline: r.underline ? {} : undefined,
     color: r.color ? r.color.replace('#', '') : undefined,
     size: r.size ? ptToHalfPt(r.size) : undefined,
-    font: r.font || undefined,
+    font: docxFont(r.font),
   });
 }
 
@@ -89,6 +105,7 @@ function blockParagraph(block, model) {
   const base = {
     style: model.styles?.[block.styleId] ? block.styleId : undefined,
     alignment: ALIGN[block.alignment || st.alignment],
+    ...(block.pageBreakBefore ? { pageBreakBefore: true } : {}),
     spacing: {
       before: (block.spaceBefore ?? st.spaceBefore) != null ? mmToTwip(block.spaceBefore ?? st.spaceBefore) : undefined,
       after: (block.spaceAfter ?? st.spaceAfter) != null ? mmToTwip(block.spaceAfter ?? st.spaceAfter) : undefined,
@@ -215,7 +232,7 @@ export async function exportDocx(workspaceDir, model) {
         italics: st.italic || undefined,
         color: st.color ? st.color.replace('#', '') : undefined,
         size: st.fontSize ? ptToHalfPt(st.fontSize) : undefined,
-        font: st.font || undefined,
+        font: docxFont(st.font),
       },
       paragraph: {
         alignment: ALIGN[st.alignment],
@@ -268,7 +285,10 @@ export async function exportDocx(workspaceDir, model) {
   const doc = new Document({
     creator: 'word-studio',
     title: model.meta?.title || '',
-    styles: { paragraphStyles },
+    styles: {
+      paragraphStyles,
+      ...(model.defaultFont ? { default: { document: { run: { font: docxFont(model.defaultFont) } } } } : {}),
+    },
     numbering: {
       config: [{
         reference: 'ws-numbering',

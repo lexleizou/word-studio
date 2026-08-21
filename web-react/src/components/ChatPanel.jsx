@@ -16,8 +16,9 @@ function ModelBar() {
   const refresh = async () => {
     const data = await api.getProviders();
     if (!data.ok) return;
-    setProviders(data.providers);
-    const active = data.providers.find(p => p.id === data.activeProviderId) || data.providers[0];
+    const usable = data.providers.filter(p => p.enabled !== false); // 停用的配置不出现在选择列表
+    setProviders(usable);
+    const active = usable.find(p => p.id === data.activeProviderId) || usable[0];
     if (active) {
       setProviderId(active.id);
       setModelName(active.model || '');
@@ -27,9 +28,18 @@ function ModelBar() {
 
   const loadModels = async (p) => {
     setWarning('');
+    // 配置了"已启用模型"的 provider 直接用该清单，否则实时拉取
+    if (p.models?.length) {
+      setModels(p.models.map(m => ({ value: m.id, label: m.label || m.id })));
+      return;
+    }
     const data = await api.getModels(p.id);
     if (data.ok) {
-      setModels(data.models || []);
+      // 条目可能是字符串（openai 兼容）或 {id,label}（codex 后端）
+      setModels((data.models || []).map(m => {
+        const id = typeof m === 'string' ? m : m.id;
+        return { value: id, label: typeof m === 'string' ? m : (m.label || m.id) };
+      }));
       if (data.warning) setWarning(data.warning);
       else if (!data.models?.length && p.type !== 'copilot' && !p.hasKey) setWarning('该 provider 未配置 API Key');
     }
@@ -68,7 +78,9 @@ function ModelBar() {
         value={modelName || undefined}
         placeholder="模型名"
         showSearch
-        options={[...new Set([...(modelName ? [modelName] : []), ...models])].map(m => ({ value: m }))}
+        options={modelName && !models.some(o => o.value === modelName)
+          ? [{ value: modelName, label: modelName }, ...models]
+          : models}
         onChange={async (v) => { setModelName(v); await save(providerId, v); }}
       />
       {warning && <span style={{ fontSize: 11, color: '#b91c1c' }} title={warning}>⚠</span>}
@@ -208,6 +220,10 @@ export default function ChatPanel() {
   const [refChips, setRefChips] = useState([]);
   const [tab, setTab] = useState('chat');
   const streamRef = useRef(null);
+  // 打字机缓冲：SSE 按网络包突发到达，队列匀速吐字才是肉眼上的逐字流式
+  const queueRef = useRef('');
+  const drainTimerRef = useRef(null);
+  const doneMetaRef = useRef(null); // done 事件已收到但队列未排空时暂存 footer 元信息
 
   useEffect(() => {
     streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight });
@@ -220,6 +236,66 @@ export default function ChatPanel() {
     return next;
   });
 
+  // 流式气泡：最后一条是 streaming 的 assistant 消息就复用，否则新开一条
+  const appendStreamText = (text) => setMessages(prev => {
+    const next = [...prev];
+    const last = next[next.length - 1];
+    if (last?.role === 'assistant' && last.streaming) {
+      next[next.length - 1] = { ...last, text: last.text + text };
+    } else {
+      next.push({ role: 'assistant', text, streaming: true });
+    }
+    return next;
+  });
+
+  const finalizeIfReady = () => {
+    const meta = doneMetaRef.current;
+    if (!meta || queueRef.current) return; // 队列没排空继续打字
+    doneMetaRef.current = null;
+    setMessages(prev => {
+      const next = [...prev];
+      let i = next.length - 1;
+      while (i >= 0 && next[i].role !== 'assistant') i--;
+      const m = { model: meta.model, usage: meta.usage, tools: meta.tools };
+      if (i === -1) next.push({ role: 'assistant', text: '', meta: m });
+      else next[i] = { ...next[i], streaming: false, meta: m };
+      return next;
+    });
+    setBusy(false);
+  };
+
+  const drain = () => {
+    const q = queueRef.current;
+    if (!q) {
+      drainTimerRef.current = null;
+      finalizeIfReady();
+      return;
+    }
+    // 自适应吐字：积压越多吐得越快，保证追上实时流
+    const n = q.length > 240 ? 16 : q.length > 120 ? 8 : q.length > 48 ? 4 : q.length > 16 ? 2 : 1;
+    queueRef.current = q.slice(n);
+    appendStreamText(q.slice(0, n));
+    drainTimerRef.current = setTimeout(drain, 16);
+  };
+  const startDrain = () => { if (!drainTimerRef.current) drainTimerRef.current = setTimeout(drain, 0); };
+
+  // 工具/提案事件介入前：把当前轮的剩余文字立即倒进气泡并封口，保持消息顺序
+  const flushAndClose = () => {
+    if (drainTimerRef.current) { clearTimeout(drainTimerRef.current); drainTimerRef.current = null; }
+    const q = queueRef.current;
+    queueRef.current = '';
+    setMessages(prev => {
+      const next = [...prev];
+      const last = next[next.length - 1];
+      if (last?.role === 'assistant' && last.streaming) {
+        next[next.length - 1] = { ...last, text: last.text + q, streaming: false };
+      } else if (q) {
+        next.push({ role: 'assistant', text: q, streaming: false });
+      }
+      return next;
+    });
+  };
+
   const send = async () => {
     const text = input.trim();
     if (!text || !doc || busy) return;
@@ -228,28 +304,37 @@ export default function ChatPanel() {
     push({ role: 'user', text, refNames: refChips.map(r => r.name) });
     const refIds = refChips.map(r => r.id);
     setRefChips([]);
-    push({ role: 'assistant', text: '' });
 
     try {
       await api.chatStream(doc.id, { message: text, selection, refIds }, (event, data) => {
         switch (event) {
           case 'delta':
-            patchLast(m => m.role === 'assistant' ? { ...m, text: m.text + data.text } : m);
+            queueRef.current += data.text;
+            startDrain();
             break;
           case 'tool':
+            flushAndClose();
             push({ role: 'tool', name: data.name });
             break;
           case 'proposal':
+            flushAndClose();
             push({ role: 'proposal', proposal: data });
             break;
           case 'applied':
+            flushAndClose();
             push({ role: 'tool', name: data.message, ok: true });
             store.loadDoc(doc.id); // 改动落盘后重载模型重渲染
             break;
           case 'rejected':
+            flushAndClose();
             push({ role: 'tool', name: `已拒绝：${data.summary}`, rejected: true });
             break;
+          case 'done':
+            doneMetaRef.current = data;
+            finalizeIfReady(); // 队列已空则立即收尾，否则由 drain 排空后收尾
+            break;
           case 'error':
+            flushAndClose();
             push({ role: 'error', text: data.message });
             break;
           default:
@@ -259,7 +344,7 @@ export default function ChatPanel() {
     } catch (err) {
       push({ role: 'error', text: '请求失败: ' + err.message });
     }
-    setBusy(false);
+    if (!doneMetaRef.current) setBusy(false); // done 已收但未排空时由 finalizeIfReady 解锁
   };
 
   return (
@@ -293,8 +378,24 @@ export default function ChatPanel() {
                 {m.refNames?.length > 0 && <div style={{ marginTop: 4, fontSize: 11, color: '#71717a' }}>引用：{m.refNames.join('、')}</div>}
               </div>
             );
-            if (m.role === 'assistant') return m.text ? (
-              <div key={i} style={{ background: '#f4f4f5', borderRadius: 8, padding: '8px 12px', margin: '0 32px 10px 0', fontSize: 13, whiteSpace: 'pre-wrap' }}>{m.text}</div>
+            if (m.role === 'assistant') return (m.text || m.meta) ? (
+              <div key={i} style={m.text
+                ? { background: '#f4f4f5', borderRadius: 8, padding: '8px 12px', margin: '0 32px 10px 0', fontSize: 13, whiteSpace: 'pre-wrap' }
+                : { margin: '0 32px 10px 0', fontSize: 13 }}>
+                {m.text}
+                {m.streaming && <span className="ws-cursor">▍</span>}
+                {m.meta && (
+                  <div className="mono" style={{ marginTop: m.text ? 6 : 0, paddingTop: m.text ? 5 : 0, borderTop: m.text ? '1px dashed #e4e4e7' : 'none', fontSize: 11, color: '#a1a1aa', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    <span>{m.meta.model || '模型未知'}</span>
+                    <span>{m.meta.usage ? `${m.meta.usage.total.toLocaleString()} tokens` : 'tokens —'}</span>
+                    <span>{
+                      m.meta.tools?.count
+                        ? `工具 ${m.meta.tools.count} 次${m.meta.tools.count <= 2 ? `（${m.meta.tools.all.join('、')}）` : ''}`
+                        : '未调用工具'
+                    }</span>
+                  </div>
+                )}
+              </div>
             ) : null;
             if (m.role === 'tool') return <ToolItem key={i} name={m.name} ok={m.ok} rejected={m.rejected} />;
             if (m.role === 'proposal') return <ProposalCard key={i} proposal={m.proposal} />;

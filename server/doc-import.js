@@ -44,6 +44,15 @@ function textOf(node) {
   return String(node['#text'] ?? '');
 }
 
+// Word 双字体：ascii（西文）+ eastAsia（中文）合成 "ascii, eastAsia" 逗号串
+function composeFont(rFonts) {
+  if (!rFonts) return undefined;
+  const ascii = rFonts['@_ascii'], east = rFonts['@_eastAsia'];
+  // w:hint="eastAsia"：整个 run（含西文/数字）都用 eastAsia 字体
+  if (rFonts['@_hint'] === 'eastAsia' && east) return east;
+  return ascii && east && east !== ascii ? `${ascii}, ${east}` : (ascii || east);
+}
+
 // ---------- 样式表解析（styles.xml → model.styles） ----------
 function parseStyles(xml) {
   const styles = {};
@@ -55,6 +64,7 @@ function parseStyles(xml) {
     const pPr = s.pPr || {};
     const rPr = s.rPr || {};
     const outline = asArray(pPr.outlineLvl)[0];
+    const olVal = outline ? Number(outline['@_val']) : null;
     const spacing = asArray(pPr.spacing)[0];
     styles[styleId] = {
       name: textOf(s.name?.['@_val'] ?? s.name) || styleId,
@@ -63,9 +73,9 @@ function parseStyles(xml) {
       bold: rPr.b != null,
       italic: rPr.i != null,
       color: asArray(rPr.color)[0]?.['@_val'],
-      font: asArray(rPr.rFonts)[0]?.['@_ascii'],
+      font: composeFont(asArray(rPr.rFonts)[0]),
       alignment: asArray(pPr.jc)[0]?.['@_val'],
-      outlineLevel: outline ? Number(outline['@_val']) + 1 : undefined,
+      outlineLevel: olVal != null && olVal < 9 ? olVal + 1 : undefined, // OOXML val 9 = 无大纲级别
       spaceBefore: twipsToMm(spacing?.['@_before']),
       spaceAfter: twipsToMm(spacing?.['@_after']),
     };
@@ -108,7 +118,9 @@ function parseRun(r, ctx) {
   if (color && color !== 'auto') run.color = '#' + color;
   const sz = halfPtToPt(asArray(rPr.sz)[0]?.['@_val']);
   if (sz) run.size = sz;
-  const font = asArray(rPr.rFonts)[0]?.['@_ascii'];
+  const font = composeFont(asArray(rPr.rFonts)[0])
+    // hint=eastAsia 但未显式给字体：整 run 回落到文档默认字体的 eastAsia（Word 语义）
+    ?? (asArray(rPr.rFonts)[0]?.['@_hint'] === 'eastAsia' ? ctx.defaultEastAsia : undefined);
   if (font) run.font = font;
   return { run };
 }
@@ -121,8 +133,37 @@ function parseParagraph(p, ctx) {
   let hasPageBreak = false;
   let isToc = false;
 
-  const runNodes = [...asArray(p.r), ...asArray(p.hyperlink).flatMap(h => asArray(h.r))];
+  const rawRunNodes = [...asArray(p.r), ...asArray(p.hyperlink).flatMap(h => asArray(h.r))];
+  // 域状态机：PAGE/NUMPAGES → 占位 run（预览按页替换/导出写真域）；
+  // 其他域（HYPERLINK/PAGEREF 等）保留缓存结果文本，域标记本身丢弃
+  const fieldStack = [];
+  const runNodes = [];
+  for (const r of rawRunNodes) {
+    const ft = asArray(r.fldChar)[0]?.['@_fldCharType'];
+    if (ft === 'begin') { fieldStack.push({ instr: '', result: [], phase: 'instr' }); continue; }
+    if (fieldStack.length) {
+      const top = fieldStack[fieldStack.length - 1];
+      if (ft === 'separate') { top.phase = 'result'; continue; }
+      if (r.instrText != null) { if (top.phase === 'instr') top.instr += textOf(r.instrText); continue; }
+      if (ft === 'end') {
+        fieldStack.pop();
+        let nodes;
+        if (/\bPAGE\b/.test(top.instr)) nodes = [{ __field: 'page' }];
+        else if (/\bNUMPAGES\b/.test(top.instr)) nodes = [{ __field: 'pages' }];
+        else nodes = top.result;
+        const outer = fieldStack[fieldStack.length - 1];
+        if (outer && outer.phase === 'result') outer.result.push(...nodes);
+        else runNodes.push(...nodes);
+        continue;
+      }
+      if (top.phase === 'result') top.result.push(r); // 域指令阶段的普通 run 丢弃
+      continue;
+    }
+    runNodes.push(r);
+  }
+
   for (const r of runNodes) {
+    if (r.__field) { runs.push({ field: r.__field }); continue; }
     if (r.instrText != null && /TOC/.test(textOf(r.instrText))) isToc = true;
     for (const br of asArray(r.br)) {
       if (br === '' || br?.['@_type'] === 'page') hasPageBreak = true;
@@ -134,6 +175,9 @@ function parseParagraph(p, ctx) {
   if (p.fldSimple != null && /TOC/.test(asArray(p.fldSimple)[0]?.['@_instr'] || '')) isToc = true;
 
   const base = { styleId: styleId || 'Normal' };
+  if (pPr.pageBreakBefore != null) base.pageBreakBefore = true; // 段前分页（目录页等靠它独占分页）
+  // 点线前导符制表位（手写目录条目"标题……页码"）：预览按 dotted leader 渲染
+  if (asArray(asArray(pPr.tabs)[0]?.tab).some(t => t['@_leader'] === 'dot')) base.dotLeaderTab = true;
   const spacing = asArray(pPr.spacing)[0];
   if (spacing?.['@_before']) base.spaceBefore = twipsToMm(spacing['@_before']);
   if (spacing?.['@_after']) base.spaceAfter = twipsToMm(spacing['@_after']);
@@ -154,7 +198,21 @@ function parseParagraph(p, ctx) {
       ctx.counters[numId] = (ctx.counters[numId] || 0) + 1;
       blocks.push({ ...base, type: 'list', ordered, level: Number(numPr.ilvl?.['@_val'] || 0), index: ctx.counters[numId], runs });
     } else {
-      blocks.push({ ...base, type: 'paragraph', runs });
+      const para = { ...base, type: 'paragraph', runs };
+      // 大纲层级：优先段落自带 outlineLvl（Word 大纲级别），否则按数字章节号（1. / 5.2）推断；
+      // 只打注解不改块类型（避免导出被套成 Word 默认 Heading 样式）
+      const pOl = asArray(pPr.outlineLvl)[0]?.['@_val'];
+      if (pOl != null && Number(pOl) < 9) {
+        para.outlineLevel = Math.min(Number(pOl) + 1, 4);
+      } else {
+        // 打印版目录条目（结尾 \t页码）排除，否则目录页会污染大纲
+        const txt = runs.map(r => r.text).join('').trim();
+        if (txt && !/\t\s*\d{1,4}\s*$/.test(txt)) {
+          const mCh = /^(\d{1,2}(?:\.\d{1,2}){0,3})[.、\s]/.exec(txt);
+          if (mCh) para.outlineLevel = Math.min(mCh[1].split('.').length, 4);
+        }
+      }
+      blocks.push(para);
     }
   }
   for (const img of images) blocks.push({ ...base, type: 'image', ...img });
@@ -353,15 +411,66 @@ export async function importDocx(workspaceDir, docxPath, originalName) {
   }
 
   const styles = parseStyles(stylesXml);
-  const ctx = { styles, rels, numbering, counters: {}, pendingImages: [] };
+  // docDefaults 先解析：run 级字体的最终回落基准（hint=eastAsia 时回落其 eastAsia）
+  const docDefaultRFonts = asArray(parser.parse(stylesXml || '<styles/>')?.styles?.docDefaults?.rPrDefault?.rPr?.rFonts)[0];
+  const defaultFont = composeFont(docDefaultRFonts);
+  const defaultEastAsia = docDefaultRFonts?.['@_eastAsia']
+    || (defaultFont?.includes(',') ? defaultFont.split(',').pop().trim() : defaultFont);
+  const ctx = { styles, rels, numbering, counters: {}, pendingImages: [], defaultEastAsia };
 
   const bodyXml = /<w:body>([\s\S]*)<\/w:body>/.exec(documentXml)?.[1] ?? '';
   const blocks = [];
+
+  // TOC 复杂域跨段落：begin/instrText/separate 在首段，缓存条目是后续若干段落，end 收尾。
+  // 逐片段做深度计数状态机，整段抽出条目（级别/标题/页码），避免缓存条目被当正文解析
+  const stripInstr = (s) => s.replace(/<w:instrText[^>]*>[\s\S]*?<\/w:instrText>/g, '');
+  const textsOf = (s) => [...s.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]);
+  const decodeXml = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+  const tocEntryOf = (frag) => {
+    const clean = stripInstr(frag);
+    const tabIdx = clean.lastIndexOf('<w:tab');
+    const title = decodeXml(textsOf(tabIdx === -1 ? clean : clean.slice(0, tabIdx)).join('')).trim();
+    const page = tabIdx === -1 ? '' : decodeXml(textsOf(clean.slice(tabIdx)).join('')).trim();
+    const pStyle = /<w:pStyle w:val="([^"]+)"/.exec(frag)?.[1];
+    const levelMatch = /toc\s*(\d)/i.exec((styles[pStyle]?.name) || pStyle || '');
+    // 条目字体取首个文本 run 的 rFonts（缓存条目通常显式带 宋体 等字体）
+    const rf = /<w:rFonts([^/]*)\/>/.exec(clean)?.[1] || '';
+    const attrs = Object.fromEntries([...rf.matchAll(/w:(\w+)="([^"]*)"/g)].map(m => ['@_' + m[1], m[2]]));
+    const font = composeFont(attrs);
+    return title ? { level: levelMatch ? Math.min(Number(levelMatch[1]), 4) : 1, text: title, page, ...(font ? { font } : {}) } : null;
+  };
+  let tocCap = null; // { depth, entries }
+  const finishToc = () => {
+    if (tocCap?.entries.length) blocks.push({ type: 'toc', ownPage: true, entries: tocCap.entries });
+    tocCap = null;
+  };
+
   for (const frag of splitTopLevel(bodyXml)) {
+    const begins = (frag.match(/fldCharType="begin"/g) || []).length;
+    const ends = (frag.match(/fldCharType="end"/g) || []).length;
+    if (tocCap) {
+      tocCap.depth += begins - ends;
+      if (begins === 0 || !/<w:instrText[^>]*>[^<]*\bTOC\b/.test(frag)) {
+        const e = tocEntryOf(frag);
+        if (e) tocCap.entries.push(e);
+      }
+      if (tocCap.depth <= 0) finishToc();
+      continue;
+    }
+    if (begins > 0 && /<w:instrText[^>]*>[^<]*\bTOC\b/.test(frag)) {
+      // TOC 域起始段：separate 之后可能紧跟第一条目
+      tocCap = { depth: begins - ends, entries: [] };
+      const afterSeparate = frag.slice(frag.lastIndexOf('fldCharType="separate"'));
+      const e = tocEntryOf(frag);
+      if (e && textsOf(stripInstr(afterSeparate)).length) tocCap.entries.push(e);
+      if (tocCap.depth <= 0) finishToc();
+      continue;
+    }
     const parsed = parser.parse(frag);
     if (parsed.p) blocks.push(...parseParagraph(parsed.p, ctx));
     else if (parsed.tbl) blocks.push(...parseTable(parsed.tbl, ctx));
   }
+  if (tocCap) finishToc(); // 未闭合容忍
 
   // 赋稳定块 id（含表格单元格内的嵌套块）
   let n = 0;
@@ -394,7 +503,10 @@ export async function importDocx(workspaceDir, docxPath, originalName) {
       const { content, hasPageField } = await parseHeaderFooterPart(docxPath, partPath, ctx);
       pageSetup[kind].enabled = true;
       pageSetup[kind].content = content;
-      if (hasPageField) {
+      // 内容里已带内联页码域（如"第X页/共Y页"）→ 页码随内容渲染，不再追加独立页码框
+      const hasInlinePage = (blocks) => blocks.some(b =>
+        (b.runs || []).some(r => r.field) || (b.type === 'table' && hasInlinePage(b.rows.flat().flatMap(c => c.blocks))));
+      if (hasPageField && !hasInlinePage(content)) {
         pageSetup.pageNumber.enabled = true;
         pageSetup.pageNumber.position = kind === 'header' ? 'header-center' : 'footer-center';
       }
@@ -410,6 +522,8 @@ export async function importDocx(workspaceDir, docxPath, originalName) {
     meta: { title: originalName.replace(/\.(docx|doc)$/i, ''), sourceFile: originalName, importedAt: new Date().toISOString() },
     pageSetup,
     styles,
+    // 文档默认字体（docDefaults）：预览/导出缺省字体的基准
+    defaultFont,
     blocks,
   };
   await writeFile(join(workspaceDir, 'model.json'), JSON.stringify(model, null, 2));

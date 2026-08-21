@@ -5,12 +5,20 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// model 里 font 是 "ascii, eastAsia" 逗号串（Word 双字体语义：西文走 ascii，中文走 eastAsia）
+function cssFontFamily(font) {
+  return `font-family:${String(font).split(',').map(f => `'${f.trim()}'`).join(',')};`;
+}
+
 function runToHtml(run, idx) {
+  // 页码域占位：注入页眉页脚后按页替换（renderPaged）
+  if (run.field === 'page') return `<span class="ws-fld-page" data-run-idx="${idx}"></span>`;
+  if (run.field === 'pages') return `<span class="ws-fld-pages" data-run-idx="${idx}"></span>`;
   let text = escapeHtml(run.text || '');
   let style = '';
   if (run.color) style += `color:${run.color};`;
   if (run.size) style += `font-size:${run.size}pt;`;
-  if (run.font) style += `font-family:${run.font};`;
+  if (run.font) style += cssFontFamily(run.font);
   if (run.bold) text = `<strong>${text}</strong>`;
   if (run.italic) text = `<em>${text}</em>`;
   if (run.underline) text = `<u>${text}</u>`;
@@ -43,10 +51,11 @@ function cellBorderCss(block, cell, ri, ci) {
 function blockStyle(block, model) {
   const st = model.styles?.[block.styleId] || {};
   let style = '';
+  if (block.pageBreakBefore) style += 'break-before:page;';
   const align = block.alignment || st.alignment;
   if (align) style += `text-align:${align === 'both' ? 'justify' : align};`;
   if (st.fontSize) style += `font-size:${st.fontSize}pt;`;
-  if (st.font) style += `font-family:${st.font};`;
+  if (st.font) style += cssFontFamily(st.font);
   const before = block.spaceBefore ?? st.spaceBefore;
   const after = block.spaceAfter ?? st.spaceAfter;
   if (before) style += `margin-top:${before}mm;`;
@@ -63,8 +72,21 @@ function blockToHtml(block, model, docId) {
   switch (block.type) {
     case 'heading':
       return `<h${block.level} ${attr}>${inner}</h${block.level}>`;
-    case 'paragraph':
+    case 'paragraph': {
+      // 点线前导符制表位（手写目录"标题……页码"）：按 flex + dotted leader 渲染
+      if (block.dotLeaderTab) {
+        const full = (block.runs || []).map(r => r.text || '').join('');
+        const ti = full.lastIndexOf('\t');
+        if (ti > 0) {
+          const title = full.slice(0, ti).trim();
+          const page = full.slice(ti + 1).trim();
+          const firstFont = (block.runs || []).find(r => r.font)?.font;
+          const style = [style, firstFont ? cssFontFamily(firstFont) : ''].filter(Boolean).join('');
+          return `<p data-block-id="${block.id}" class="toc-e" style="${style}"><span class="toc-t">${escapeHtml(title)}</span><span class="toc-dots"></span><span class="toc-p">${escapeHtml(page)}</span></p>`;
+        }
+      }
       return inner ? `<p ${attr}>${inner}</p>` : `<p ${attr}><br></p>`;
+    }
     case 'list': {
       const marker = block.ordered ? `${block.index}. ` : '• ';
       const indent = 1.2 + (block.level || 0) * 1.2;
@@ -116,8 +138,17 @@ function blockToHtml(block, model, docId) {
       const w = block.widthMm ? ` style="max-width:100%;width:${Math.round(block.widthMm * MM_TO_PX)}px"` : ' style="max-width:100%"';
       return `<p ${attr} class="doc-image"><img src="/api/docs/${docId}/assets/${block.src.split('/').pop()}"${w} alt=""></p>`;
     }
-    case 'toc':
+    case 'toc': {
+      // 有缓存条目：按 Word 打印版目录渲染（层级缩进 + 点线 + 右对齐页码）；
+      // 无条目（fldSimple 或空域）：占位框，导出 docx 时由 Word 更新域生成
+      if (block.entries?.length) {
+        const rows = block.entries.map(e =>
+          `<div class="toc-e toc-l${e.level}"${e.font ? ` style="${cssFontFamily(e.font)}"` : ''}><span class="toc-t">${escapeHtml(e.text)}</span><span class="toc-dots"></span><span class="toc-p">${escapeHtml(e.page)}</span></div>`
+        ).join('');
+        return `<div ${attr} class="doc-toc">${rows}</div>`;
+      }
       return `<div ${attr} class="doc-toc-placeholder">目录<span>（导出 docx 时由 Word 更新域生成）</span></div>`;
+    }
     case 'pageBreak':
       return `<hr ${attr} class="doc-page-break">`;
     default:
@@ -128,9 +159,17 @@ function blockToHtml(block, model, docId) {
 // model.pageSetup → @page CSS（纸张/边距/页眉页脚/页码 margin boxes）
 const NUM_CSS = { decimal: 'decimal', lowerRoman: 'lower-roman', upperRoman: 'upper-roman', lowerLetter: 'lower-latin', upperLetter: 'upper-latin' };
 
-export function pageCss(model, docId) {
+export function pageCss(model, docId, hfMeas = {}) {
   const ps = model.pageSetup || {};
-  const m = ps.margins || { top: 25.4, bottom: 25.4, left: 31.8, right: 31.8 };
+  const m = { ...(ps.margins || { top: 25.4, bottom: 25.4, left: 31.8, right: 31.8 }) };
+  // Word 语义：页眉从 header 距顶位置起排，内容比页边距高时正文整体下移；
+  // Paged.js 的 margin box 高度固定等于页边距，装不下会顶裁/压正文 → 量出实际高度动态加大边距
+  if (ps.header?.enabled && hfMeas.headerH) {
+    m.top = Math.max(m.top, Math.round(((ps.header.distanceMm ?? 15) + hfMeas.headerH + 1) * 10) / 10);
+  }
+  if (ps.footer?.enabled && hfMeas.footerH) {
+    m.bottom = Math.max(m.bottom, Math.round(((ps.footer.distanceMm ?? 15) + hfMeas.footerH + 1) * 10) / 10);
+  }
   const size = ps.size === 'Letter' ? 'letter' : 'A4';
   const orient = ps.orientation === 'landscape' ? ' landscape' : '';
   const cssStr = (s) => '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
@@ -165,12 +204,20 @@ export function pageCss(model, docId) {
     marginBoxes += `${box} { content: counter(page, ${fmt}); ${boxStyle} }`;
   }
   blocks.push(`@page { size: ${size}${orient}; margin: ${m.top}mm ${m.right}mm ${m.bottom}mm ${m.left}mm; ${marginBoxes} }`);
+  // 文档默认字体（docDefaults 基准）
+  if (model.defaultFont) blocks.push(`.doc-content { ${cssFontFamily(model.defaultFont)} }`);
   if (ps.pageNumber?.enabled && ps.pageNumber.startAt && ps.pageNumber.startAt !== 1) {
     blocks.push(`@page:first { counter-reset: page ${ps.pageNumber.startAt}; }`);
   }
-  // 目录独占一页（Paged.js 的 break-after 支持不全，用相邻兄弟选择器补一刀）、显式分页符
+  // 段前分页（pageBreakBefore）：Paged.js 对内联 break-before 不敏感，走样式表规则
+  for (const b of model.blocks || []) {
+    if (b.pageBreakBefore) blocks.push(`[data-block-id="${b.id}"] { break-before: page; }`);
+  }
+  // 目录独占一页：TOC 块不再自带 break-before（避免和"目录"标题分家），靠标题段前分页或占位框规则
   blocks.push('.doc-toc-placeholder { break-before: page; break-after: page; }');
   blocks.push('.doc-toc-placeholder + * { break-before: page; }');
+  blocks.push('.doc-toc { break-after: page; }');
+  blocks.push('.doc-toc + * { break-before: page; }');
   blocks.push('.doc-page-break { border: none; margin: 0; break-after: page; }');
   return blocks.join('\n');
 }
@@ -198,23 +245,54 @@ export async function renderPaged(container, model, docId) {
   const source = document.createElement('div');
   source.innerHTML = `<article class="doc-content">${html || '<p>（文档为空）</p>'}</article>`;
   container.innerHTML = '';
-  const previewer = new window.Paged.Previewer();
-  // 样式表参数用 { url: 文本 } 形式传内联 CSS（@page 规则才会被 polisher 解析）
-  const flow = await previewer.preview(source, [{ [location.href + '#pagecss']: pageCss(model, docId) }], container);
 
-  // 页眉/页脚注入：结构化块（表格+图片+段落）渲染成 DOM 放进每页 margin box
-  for (const [pos, cfg] of [['top', model.pageSetup?.header], ['bottom', model.pageSetup?.footer]]) {
+  // 分页前先离线量出页眉/页脚实际高度（图片要等加载），供 pageCss 动态加大边距
+  const m0 = model.pageSetup?.margins || { left: 31.8, right: 31.8 };
+  const isLetter = model.pageSetup?.size === 'Letter';
+  const landscape = model.pageSetup?.orientation === 'landscape';
+  let wMm = isLetter ? 215.9 : 210;
+  if (landscape) wMm = isLetter ? 279.4 : 297;
+  const contentWmm = wMm - m0.left - m0.right;
+  const hfInner = {};
+  const hfMeas = {};
+  for (const [key, cfg] of [['header', model.pageSetup?.header], ['footer', model.pageSetup?.footer]]) {
     if (!cfg?.enabled || !(cfg.content || []).length) continue;
     const inner = hfHtml(cfg.content, model, docId);
     if (!inner) continue;
-    for (const page of flow.pages || []) {
+    hfInner[key] = inner;
+    const el = document.createElement('div');
+    el.className = 'doc-hf';
+    el.style.cssText = `position:absolute;visibility:hidden;left:-9999px;top:0;width:${contentWmm}mm;`;
+    el.innerHTML = inner;
+    document.body.appendChild(el);
+    await Promise.all([...el.querySelectorAll('img')].map(img =>
+      img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })));
+    hfMeas[key + 'H'] = el.offsetHeight / MM_TO_PX;
+    el.remove();
+  }
+
+  const previewer = new window.Paged.Previewer();
+  // 样式表参数用 { url: 文本 } 形式传内联 CSS（@page 规则才会被 polisher 解析）
+  const flow = await previewer.preview(source, [{ [location.href + '#pagecss']: pageCss(model, docId, hfMeas) }], container);
+
+  // 页眉/页脚注入：放进每页 margin box，并按 header/footer 距离定位（与 Word 一致）
+  const startAt = model.pageSetup?.pageNumber?.startAt ?? 1;
+  const totalPages = (flow.pages || []).length;
+  for (const [pos, key, cfg] of [['top', 'header', model.pageSetup?.header], ['bottom', 'footer', model.pageSetup?.footer]]) {
+    if (!cfg?.enabled || !hfInner[key]) continue;
+    const dist = cfg.distanceMm ?? 15;
+    const posStyle = pos === 'top' ? `margin-top:${dist}mm;` : `margin-bottom:${dist}mm;`;
+    (flow.pages || []).forEach((page, pi) => {
       const box = page.element.querySelector(`.pagedjs_margin-${pos}-center`);
       const content = box?.querySelector('.pagedjs_margin-content');
       if (content) {
-        content.innerHTML = `<div class="doc-hf doc-hf-${pos}">${inner}</div>`;
+        content.innerHTML = `<div class="doc-hf doc-hf-${pos}" style="${posStyle}">${hfInner[key]}</div>`;
+        // 内联页码域按页替换（第X页/共Y页）
+        content.querySelectorAll('.ws-fld-page').forEach(el => { el.textContent = String(pi + startAt); });
+        content.querySelectorAll('.ws-fld-pages').forEach(el => { el.textContent = String(totalPages + startAt - 1); });
         box.classList.add('hasContent');
       }
-    }
+    });
   }
   return flow;
 }

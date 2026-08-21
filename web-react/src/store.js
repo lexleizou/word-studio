@@ -48,15 +48,23 @@ export function flattenBlocks(docModel) {
   return out;
 }
 
+// 大纲条目：显式 heading 块，或导入时按数字章节号推断出 outlineLevel 的段落
+const blockLevel = (b) => (b.type === 'heading' ? b.level : b.outlineLevel);
+export function outlineBlocks(docModel) {
+  return (docModel?.blocks || [])
+    .filter(b => blockLevel(b) != null)
+    .map(b => ({ id: b.id, level: blockLevel(b), title: (b.runs || []).map(r => r.text).join('') }));
+}
+
 // 章节子树：标题块 + 直到同级或更高级标题前的所有块
 export function chapterBlockIds(docModel, headingId) {
   const blocks = docModel.blocks;
   const idx = blocks.findIndex(b => b.id === headingId);
-  if (idx === -1 || blocks[idx].type !== 'heading') return [headingId];
-  const level = blocks[idx].level;
+  if (idx === -1 || blockLevel(blocks[idx]) == null) return [headingId];
+  const level = blockLevel(blocks[idx]);
   const ids = [];
   for (let i = idx; i < blocks.length; i++) {
-    if (i > idx && blocks[i].type === 'heading' && blocks[i].level <= level) break;
+    if (i > idx && blockLevel(blocks[i]) != null && blockLevel(blocks[i]) <= level) break;
     ids.push(blocks[i].id);
   }
   return ids;

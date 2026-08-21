@@ -20,8 +20,9 @@ npm start          # 或 npm run dev（--watch）
 - **内容与格式分离编辑**：块级编辑模式只改内容；格式菜单栏统一管页面设置与样式表
 - **选区**：块点选 / Shift 连选 / 大纲选章 / 块内文本选区；格式操作与 AI 写工具都限定在选区内
 - **Git 版本管理**：每次修改（手动 / AI / 格式）一个 commit；历史面板一键回退（回退是新 commit）
-- **AI 对话**：流式输出 + 工具时间轴；写工具一律 diff 预览、确认后才落盘
-  - provider：OpenAI 兼容 endpoint（默认预填本机 127.0.0.1:4000）/ GitHub Copilot 设备码登录
+- **AI 对话**：逐字流式输出 + 工具时间轴 + 消息脚注（模型 / tokens 消耗 / 工具调用）；写工具一律 diff 预览、确认后才落盘
+  - provider 体系：设置里列表式管理（一行一个，点进详情）；类型预设含 OpenAI 兼容端点（自定义）/ OpenAI / DeepSeek / Moonshot / 智谱 / OpenRouter；支持测试连接、从供应商拉模型列表逐个启停
+  - OAuth 账号型 provider（均可多账号）：GitHub Copilot（设备码）/ Codex（ChatGPT 账号 PKCE，走 Responses API）
   - `@` 引用文件（docx/pdf/txt/md 提取文本注入上下文，图片走多模态），AI 可用 `import_file` 导入文档
   - Skills：目录式技能（`data/skills/<name>/SKILL.md`），设置面板启停 / 导入
   - MCP：stdio + streamable-http 客户端，配置存 `data/mcp.json`，工具以 `mcp__<服务>__<工具>` 并入
@@ -64,16 +65,18 @@ npx vite build       # 前端（web-react/ → web-dist/，React + antd）；服
 集成测试（需服务已启动 + Chrome）：
 
 ```bash
-node dev-cdp.mjs "http://127.0.0.1:4173/dev-test.html" 45   # UI 集成（选区/编辑/格式）
-node dev-test-ai.mjs     # AI 对话链路（mock LLM）
-node dev-test-mcp.mjs    # MCP 链路（mock server）
+node dev-test-react.mjs   # React UI 主链路（分页/选区/编辑/设置面板）
+node dev-test-react2.mjs  # React UI 第二批（格式菜单/历史/文件面板/页面设置）
+node dev-test-stream.mjs  # AI 逐字流式 + 消息脚注（mock LLM，配置自动保存/恢复）
+node dev-test-ai.mjs      # AI 对话链路（mock LLM，含 done 元信息断言）
+node dev-test-mcp.mjs     # MCP 链路（mock server）
 node dev-test-copilot.mjs # Copilot provider 链路（假 token）
 ```
 
 ## 已知限制（v1）
 
-- 往返有损：支持标题/段落/表格/图片/列表/分页符/目录/页眉页脚页码；域、文本框、SmartArt、脚注尾注不支持，导入时跳过
+- 往返有损：支持标题/段落/表格（边框/合并/行高/列宽）/图片/列表/分页符/目录（域缓存条目保真预览，导出走活域）/页眉页脚页码（含"第X页/共Y页"内联域）；文本框、SmartArt、脚注尾注不支持，导入时跳过
 - TOC 以 Word 域导出，打开文档时需更新域生成条目（Word 会提示）
 - 预览分页是近似，精确页码以导出的 docx 在 Word 中分页为准
-- Copilot OAuth 是 GitHub 非公开 API 方案，政策变动可能失效
+- Copilot OAuth 是 GitHub 非公开 API 方案，政策变动可能失效；Codex OAuth 复用 Codex CLI 公开 client_id，其 Responses API 适配层需真实账号登录验证
 - 不做多人实时协同（git 保证版本一致，不是 OT/CRDT）

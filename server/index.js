@@ -141,6 +141,13 @@ async function runChatLoop(docId, dir, body, send) {
 
   let iterations = 0;
   let assistantText = '';
+  const usageSum = { prompt: 0, completion: 0, rounds: 0 }; // 工具循环每轮都是一次完整上下文，累计
+  const toolNames = [];
+  const doneMeta = () => ({
+    model: provider.model || '',
+    usage: usageSum.rounds ? { prompt: usageSum.prompt, completion: usageSum.completion, total: usageSum.prompt + usageSum.completion } : null,
+    tools: { count: toolNames.length, names: toolNames.slice(0, 2), all: toolNames },
+  });
   while (iterations++ < 8) {
     assistantText = '';
     const toolResults = [];
@@ -149,7 +156,15 @@ async function runChatLoop(docId, dir, body, send) {
       messages,
       tools: await getOpenAiTools(),
       onDelta: (t) => { assistantText += t; send('delta', { text: t }); },
+      onDone: (u) => {
+        if (u) {
+          usageSum.prompt += u.prompt_tokens || 0;
+          usageSum.completion += u.completion_tokens || 0;
+          usageSum.rounds++;
+        }
+      },
       onToolCallDone: async (tc) => {
+        toolNames.push(tc.name);
         send('tool', { name: tc.name });
         let args;
         try { args = JSON.parse(tc.arguments || '{}'); } catch { args = {}; }
@@ -185,10 +200,10 @@ async function runChatLoop(docId, dir, body, send) {
     }
     // 纯文本回复 → 收尾
     await appendSession(docId, [{ role: 'user', content: body.message }, { role: 'assistant', content: assistantText }]);
-    send('done', {});
+    send('done', doneMeta());
     return;
   }
-  send('done', { maxIterations: true });
+  send('done', { ...doneMeta(), maxIterations: true });
 }
 
 // .doc → .docx（LibreOffice headless；缺失时给出明确指引）
@@ -435,9 +450,15 @@ async function handleApi(req, res, url) {
     }
     const old = await getProviders();
     const providers = (body.providers || []).map(p => {
-      // apiKey 留空表示沿用原值
+      // apiKey 留空表示沿用原值；models/enabled 未传时沿用
       const prev = old.find(o => o.id === p.id);
-      return { id: p.id, name: p.name, type: p.type || 'openai-compat', baseUrl: p.baseUrl, apiKey: p.apiKey || prev?.apiKey || '', model: p.model };
+      return {
+        id: p.id, name: p.name, type: p.type || 'openai-compat', baseUrl: p.baseUrl,
+        apiKey: p.apiKey || prev?.apiKey || '', model: p.model,
+        models: Array.isArray(p.models) ? p.models : (prev?.models || []),
+        availableModels: Array.isArray(p.availableModels) ? p.availableModels : (prev?.availableModels || []),
+        enabled: p.enabled ?? prev?.enabled ?? true,
+      };
     });
     await saveProviders(providers);
     if (body.activeProviderId) await setActiveProviderId(body.activeProviderId);
@@ -523,28 +544,63 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  // Copilot OAuth：状态 / 设备码发起 / 轮询 / 登出
+  // Copilot OAuth（多账号：accountId = provider 实例 id）：状态 / 设备码发起 / 轮询 / 登出
   if (url.pathname === '/api/copilot/status' && req.method === 'GET') {
-    sendJson(res, 200, { ok: true, ...(await copilotStatus()) });
+    sendJson(res, 200, { ok: true, ...(await copilotStatus(url.searchParams.get('accountId') || 'copilot')) });
     return;
   }
   if (url.pathname === '/api/copilot/login/start' && req.method === 'POST') {
+    const body = await readBody(req).catch(() => '{}');
+    const accountId = JSON.parse(body || '{}').accountId || 'copilot';
     try {
-      sendJson(res, 200, { ok: true, ...(await startDeviceLogin()) });
+      sendJson(res, 200, { ok: true, ...(await startDeviceLogin(accountId)) });
     } catch (err) {
       sendJson(res, 500, { ok: false, error: 'device_code_failed', message: err.message });
     }
     return;
   }
   if (url.pathname === '/api/copilot/login/poll' && req.method === 'POST') {
-    sendJson(res, 200, { ok: true, ...(await pollDeviceLogin()) });
+    const body = await readBody(req).catch(() => '{}');
+    const accountId = JSON.parse(body || '{}').accountId || 'copilot';
+    sendJson(res, 200, { ok: true, ...(await pollDeviceLogin(accountId)) });
     return;
   }
   if (url.pathname === '/api/copilot/logout' && req.method === 'POST') {
-    await copilotLogout();
-    // 登出时顺手移除 copilot provider
-    const providers = await getProviders();
-    await saveProviders(providers.filter(p => p.type !== 'copilot'));
+    const body = await readBody(req).catch(() => '{}');
+    await copilotLogout(JSON.parse(body || '{}').accountId || 'copilot');
+    // 只清该账号 token；provider 条目由用户在界面上自行删除
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // Codex（ChatGPT 账号）OAuth：状态 / 发起（授权 URL + 本地回调）/ 轮询 / 登出
+  if (url.pathname === '/api/codex/status' && req.method === 'GET') {
+    const { codexStatus } = await import('./codex-auth.js');
+    sendJson(res, 200, { ok: true, ...(await codexStatus(url.searchParams.get('accountId') || 'codex')) });
+    return;
+  }
+  if (url.pathname === '/api/codex/login/start' && req.method === 'POST') {
+    const body = await readBody(req).catch(() => '{}');
+    const accountId = JSON.parse(body || '{}').accountId || 'codex';
+    const { startCodexLogin } = await import('./codex-auth.js');
+    try {
+      sendJson(res, 200, { ok: true, ...(await startCodexLogin(accountId)) });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: 'codex_login_failed', message: err.message });
+    }
+    return;
+  }
+  if (url.pathname === '/api/codex/login/poll' && req.method === 'POST') {
+    const body = await readBody(req).catch(() => '{}');
+    const accountId = JSON.parse(body || '{}').accountId || 'codex';
+    const { pollCodexLogin } = await import('./codex-auth.js');
+    sendJson(res, 200, { ok: true, ...(await pollCodexLogin(accountId)) });
+    return;
+  }
+  if (url.pathname === '/api/codex/logout' && req.method === 'POST') {
+    const body = await readBody(req).catch(() => '{}');
+    const { codexLogout } = await import('./codex-auth.js');
+    await codexLogout(JSON.parse(body || '{}').accountId || 'codex');
     sendJson(res, 200, { ok: true });
     return;
   }
@@ -559,12 +615,15 @@ async function handleApi(req, res, url) {
       let models;
       if (p.type === 'copilot') {
         const { getCopilotToken, COPILOT_API_BASE } = await import('./copilot-auth.js');
-        const token = await getCopilotToken();
+        const token = await getCopilotToken(p.id); // 多账号：按 provider 实例取 token
         const r = await fetch(COPILOT_API_BASE + '/models', {
           headers: { Authorization: `Bearer ${token}`, 'Editor-Version': 'vscode/1.95.0', 'User-Agent': 'GitHubCopilotChat/0.26.7' },
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         models = (await r.json()).data?.map(m => m.id) || [];
+      } else if (p.type === 'codex') {
+        const { listCodexModels } = await import('./codex-auth.js');
+        models = await listCodexModels(p.id); // 真实后端列表（{id,label}）
       } else {
         const r = await fetch(p.baseUrl.replace(/\/+$/, '') + '/models', {
           headers: p.apiKey ? { Authorization: `Bearer ${p.apiKey}` } : {},
@@ -575,6 +634,46 @@ async function handleApi(req, res, url) {
       sendJson(res, 200, { ok: true, models });
     } catch (err) {
       sendJson(res, 200, { ok: true, models: [], warning: `模型列表拉取失败: ${err.message}` });
+    }
+    return;
+  }
+
+  // POST /api/config/probe —— 未保存的端点探测：测试连接 + 拉可用模型列表（添加模型配置页用）
+  if (url.pathname === '/api/config/probe' && req.method === 'POST') {
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { sendJson(res, 400, { ok: false, error: 'bad_json' }); return; }
+    const t0 = Date.now();
+    try {
+      let models;
+      if (body.type === 'copilot') {
+        // Copilot：用该账号槽位的 OAuth token 拉 /models（未登录在 getCopilotToken 抛错）
+        const { getCopilotToken, COPILOT_API_BASE } = await import('./copilot-auth.js');
+        const token = await getCopilotToken(body.accountId || 'copilot');
+        const r = await fetch(COPILOT_API_BASE + '/models', {
+          headers: { Authorization: `Bearer ${token}`, 'Editor-Version': 'vscode/1.95.0', 'User-Agent': 'GitHubCopilotChat/0.26.7' },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        models = (await r.json()).data?.map(m => m.id) || [];
+      } else if (body.type === 'codex') {
+        const { listCodexModels } = await import('./codex-auth.js');
+        models = await listCodexModels(body.accountId || 'codex'); // 真实后端列表（{id,label}）
+        if (!models.length) {
+          sendJson(res, 200, { ok: true, models, latencyMs: Date.now() - t0, warning: '该账号的 Codex 模型目录为空：通常表示此 ChatGPT 账号未开通 Codex 权限（需 Plus/Pro/Team 等计划）' });
+          return;
+        }
+      } else {
+        if (!body.baseUrl) { sendJson(res, 200, { ok: false, error: 'baseUrl 为空' }); return; }
+        const r = await fetch(String(body.baseUrl).replace(/\/+$/, '') + '/models', {
+          headers: body.apiKey ? { Authorization: `Bearer ${body.apiKey}` } : {},
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        models = (await r.json()).data?.map(m => m.id) || [];
+      }
+      sendJson(res, 200, { ok: true, models, latencyMs: Date.now() - t0 });
+    } catch (err) {
+      sendJson(res, 200, { ok: false, error: `连接失败: ${err.message}` });
     }
     return;
   }
